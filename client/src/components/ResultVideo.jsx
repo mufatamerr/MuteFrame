@@ -2,27 +2,38 @@ import './ResultVideo.css'
 
 function ResultVideo({ videoUrl, onReset }) {
   // Handle both string (legacy) and object (new) formats
-  const displayUrl = typeof videoUrl === 'object' ? videoUrl.videoUrl : videoUrl
+  const apiUrl = import.meta.env.VITE_API_URL || ''
+  let displayUrl = typeof videoUrl === 'object' ? videoUrl.videoUrl : videoUrl
   const providedDownloadUrl = typeof videoUrl === 'object' ? videoUrl.downloadUrl : null
+  
+  // If displayUrl is relative, prepend API URL
+  if (displayUrl && !displayUrl.startsWith('http') && !displayUrl.startsWith('blob:')) {
+    displayUrl = `${apiUrl}${displayUrl}`
+  }
   
   const handleDownload = async () => {
     try {
       // Use provided downloadUrl if available, otherwise construct it
       let downloadUrl = providedDownloadUrl
       
+      const apiUrl = import.meta.env.VITE_API_URL || ''
+      
       if (!downloadUrl) {
         // Extract filename from videoUrl
         if (displayUrl.includes('/output/')) {
           const filename = displayUrl.split('/output/')[1].split('?')[0]
-          downloadUrl = `/api/video/${filename}`
+          downloadUrl = `${apiUrl}/api/video/${filename}`
         } else if (displayUrl.includes('/api/video/')) {
-          downloadUrl = displayUrl
+          downloadUrl = displayUrl.startsWith('http') ? displayUrl : `${apiUrl}${displayUrl}`
         } else {
           // Try to extract filename from any URL format
           const urlParts = displayUrl.split('/')
           const filename = urlParts[urlParts.length - 1].split('?')[0]
-          downloadUrl = `/api/video/${filename}`
+          downloadUrl = `${apiUrl}/api/video/${filename}`
         }
+      } else if (!downloadUrl.startsWith('http')) {
+        // If downloadUrl is relative, prepend API URL
+        downloadUrl = `${apiUrl}${downloadUrl}`
       }
       
       console.log('Downloading from:', downloadUrl)

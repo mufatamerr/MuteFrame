@@ -31,7 +31,8 @@ function App() {
         formData.append('youtubeUrl', data)
       }
 
-      const response = await fetch('/api/process', {
+      const apiUrl = import.meta.env.VITE_API_URL || ''
+      const response = await fetch(`${apiUrl}/api/process`, {
         method: 'POST',
         body: formData,
       })
