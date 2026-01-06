@@ -1,16 +1,59 @@
 import 'dotenv/config'
+import { config } from 'dotenv'
+import { fileURLToPath } from 'url'
+import path from 'path'
+import { existsSync } from 'fs'
+
+// Explicitly load .env file from server directory
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+const envPath = path.join(__dirname, '.env')
+
+// Check if .env file exists
+if (existsSync(envPath)) {
+  console.log('✅ Found .env file at:', envPath)
+  const result = config({ path: envPath })
+  if (result.error) {
+    console.error('❌ Error loading .env file:', result.error)
+  } else {
+    console.log('✅ .env file loaded successfully')
+    // Debug: Check what was actually loaded
+    console.log('📋 Environment variables check:')
+    console.log('   STRIPE_SECRET_KEY:', process.env.STRIPE_SECRET_KEY ? `✅ (${process.env.STRIPE_SECRET_KEY.substring(0, 20)}...)` : '❌ undefined')
+    console.log('   STRIPE_PRICE_ID_TIER1:', process.env.STRIPE_PRICE_ID_TIER1 || '❌ undefined')
+    console.log('   STRIPE_PRICE_ID_TIER2:', process.env.STRIPE_PRICE_ID_TIER2 || '❌ undefined')
+    console.log('   STRIPE_PRICE_ID_KING:', process.env.STRIPE_PRICE_ID_KING || '❌ undefined')
+  }
+} else {
+  console.error('❌ .env file NOT FOUND at:', envPath)
+  console.error('   Please create a .env file in the server/ directory')
+}
+
 import express from 'express'
 import cors from 'cors'
 import multer from 'multer'
-import path from 'path'
-import { fileURLToPath } from 'url'
 import fs from 'fs-extra'
 import { execSync } from 'child_process'
 import { processVideo } from './services/videoProcessor.js'
 import { downloadYouTubeVideo } from './services/youtubeDownloader.js'
+import { 
+  verifyIdToken, 
+  checkUserTokens, 
+  deductTokens, 
+  createCheckoutSession,
+  handleStripeWebhook,
+  getUserSubscription,
+  SUBSCRIPTION_TIERS,
+  stripe
+} from './services/subscriptionService.js'
+import ffmpeg from 'fluent-ffmpeg'
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
+// Log environment variables for debugging
+console.log('Environment check:')
+console.log('  STRIPE_SECRET_KEY:', process.env.STRIPE_SECRET_KEY ? `✅ Set (${process.env.STRIPE_SECRET_KEY.substring(0, 20)}...)` : '❌ Not set')
+console.log('  PORT:', process.env.PORT || '3001 (default)')
+
+console.log('✅ All imports loaded successfully')
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -146,8 +189,40 @@ app.get('/api/video/:filename', (req, res) => {
   }
 })
 
+// Authentication middleware
+async function authenticateUser(req, res, next) {
+  try {
+    const authHeader = req.headers.authorization
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Authentication required', code: 'UNAUTHORIZED' })
+    }
+
+    const idToken = authHeader.split('Bearer ')[1]
+    const userId = await verifyIdToken(idToken)
+    req.userId = userId
+    next()
+  } catch (error) {
+    console.error('Authentication error:', error)
+    return res.status(401).json({ error: 'Invalid authentication token', code: 'UNAUTHORIZED' })
+  }
+}
+
+// Helper function to get video duration
+function getVideoDuration(videoPath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(videoPath, (err, metadata) => {
+      if (err) {
+        reject(err)
+        return
+      }
+      const duration = metadata.format.duration || 0
+      resolve(duration)
+    })
+  })
+}
+
 // Main processing endpoint
-app.post('/api/process', upload.single('video'), async (req, res) => {
+app.post('/api/process', upload.single('video'), authenticateUser, async (req, res) => {
   const sendProgress = (progress, status) => {
     try {
       res.write(`data: ${JSON.stringify({ progress, status })}\n\n`)
@@ -163,6 +238,7 @@ app.post('/api/process', upload.single('video'), async (req, res) => {
     }
     let videoPath = null
     const tempFiles = []
+    let videoDuration = 0
 
     try {
       // Set up streaming response
@@ -184,10 +260,51 @@ app.post('/api/process', upload.single('video'), async (req, res) => {
         throw new Error('No video file or YouTube URL provided')
       }
 
+      // Get video duration and check tokens
+      sendProgress(12, 'Checking video duration...')
+      try {
+        videoDuration = await getVideoDuration(videoPath)
+        // Calculate tokens: minimum 1 token for videos under 1 minute, round down for longer videos
+        const tokensNeeded = videoDuration < 60 ? 1 : Math.floor(videoDuration / 60)
+        
+        // Check if user has enough tokens
+        const tokenCheck = await checkUserTokens(req.userId, videoDuration)
+        if (!tokenCheck.hasEnough) {
+          res.write(`data: ${JSON.stringify({ 
+            error: `Insufficient tokens. You need ${tokenCheck.tokensNeeded} tokens but only have ${tokenCheck.tokensRemaining} remaining.`,
+            code: 'INSUFFICIENT_TOKENS',
+            tokensNeeded: tokenCheck.tokensNeeded,
+            tokensRemaining: tokenCheck.tokensRemaining
+          })}\n\n`)
+          res.end()
+          return
+        }
+      } catch (error) {
+        console.error('Error checking tokens:', error)
+        // Continue processing if token check fails (for now)
+      }
+
       sendProgress(20, 'Processing video and extracting audio...')
       
       // Process the video
       const result = await processVideo(videoPath, outputDir, sendProgress)
+      
+      // Deduct tokens after successful processing
+      try {
+        // Calculate tokens: minimum 1 token for videos under 1 minute, round down for longer videos
+        const tokensUsed = videoDuration < 60 ? 1 : Math.floor(videoDuration / 60)
+        const newTokensRemaining = await deductTokens(req.userId, tokensUsed)
+        console.log(`✅ Deducted ${tokensUsed} tokens from user ${req.userId}. New balance: ${newTokensRemaining}`)
+        
+        // Include token deduction info in response for client to update Firestore
+        res.write(`data: ${JSON.stringify({ 
+          tokensDeducted: tokensUsed,
+          newTokensRemaining: newTokensRemaining
+        })}\n\n`)
+      } catch (error) {
+        console.error('Error deducting tokens:', error)
+        // Don't fail the request if token deduction fails
+      }
       
       sendProgress(95, 'Finalizing...')
       
@@ -270,20 +387,244 @@ app.post('/api/process', upload.single('video'), async (req, res) => {
   }
 })
 
+// Get user subscription info
+app.get('/api/subscription', authenticateUser, async (req, res) => {
+  try {
+    const subscription = await getUserSubscription(req.userId)
+    res.json(subscription)
+  } catch (error) {
+    console.error('Error getting subscription:', error)
+    res.status(500).json({ error: 'Failed to get subscription info' })
+  }
+})
+
+// Sync subscription from Stripe (called after successful payment)
+app.post('/api/sync-subscription', authenticateUser, async (req, res) => {
+  try {
+    const userId = req.userId
+    // Get user email from request body or try to get from token
+    let userEmail = req.body.email
+    if (!userEmail && req.user) {
+      userEmail = req.user.email
+    }
+    console.log('Syncing subscription for user:', userId, 'Email:', userEmail)
+    const userSubscription = await getUserSubscription(userId)
+    console.log('Current subscription:', userSubscription.subscriptionTier, 'Customer ID:', userSubscription.stripeCustomerId)
+    
+    let customerId = userSubscription.stripeCustomerId
+    
+    // If no customer ID in Firestore, try to find it by email in Stripe
+    if (!customerId && userEmail) {
+      console.log('No customer ID in Firestore, searching Stripe by email:', userEmail)
+      const customers = await stripe.customers.list({
+        email: userEmail,
+        limit: 1
+      })
+      
+      if (customers.data.length > 0) {
+        customerId = customers.data[0].id
+        console.log('Found Stripe customer by email:', customerId)
+        // Continue to check subscriptions below (don't return early)
+      } else {
+        console.log('No Stripe customer found for email:', userEmail)
+        res.json({
+          success: true,
+          subscription: userSubscription
+        })
+        return
+      }
+    }
+    
+    // If user has a Stripe customer ID, check their active subscriptions
+    if (customerId) {
+      // Get all subscriptions (including trialing, incomplete, etc. - not just active)
+      // Sometimes subscriptions are in 'trialing' or 'incomplete' state right after payment
+      const subscriptions = await stripe.subscriptions.list({
+        customer: customerId,
+        limit: 10
+      })
+      
+      console.log(`Found ${subscriptions.data.length} subscriptions for customer ${customerId}`)
+      
+      // Find the most recent subscription (active, trialing, or incomplete)
+      const activeSubscription = subscriptions.data.find(sub => 
+        sub.status === 'active' || sub.status === 'trialing' || sub.status === 'incomplete'
+      ) || subscriptions.data[0] // Fallback to most recent
+      
+      if (activeSubscription) {
+        console.log('Found subscription:', activeSubscription.id, 'Status:', activeSubscription.status)
+        const priceId = activeSubscription.items.data[0].price.id
+        console.log('Price ID:', priceId)
+        
+        // Determine tier from price ID
+        let tier = 'FREE'
+        if (priceId === process.env.STRIPE_PRICE_ID_TIER1) {
+          tier = 'TIER1'
+        } else if (priceId === process.env.STRIPE_PRICE_ID_TIER2) {
+          tier = 'TIER2'
+        } else if (priceId === process.env.STRIPE_PRICE_ID_KING) {
+          tier = 'KING'
+        }
+        
+        console.log('Determined tier:', tier)
+        const tierConfig = SUBSCRIPTION_TIERS[tier]
+        const now = new Date()
+        const nextReset = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+        
+        // Return the update data so client can update Firestore
+        const subscriptionData = {
+          subscriptionTier: tier,
+          tokensRemaining: tierConfig.tokens,
+          tokensTotal: tierConfig.tokens,
+          stripeSubscriptionId: activeSubscription.id,
+          lastResetDate: now.toISOString(),
+          nextResetDate: nextReset.toISOString(),
+          stripeCustomerId: customerId // Always include customer ID so client can save it
+        }
+        
+        console.log('✅ Returning subscription data:', subscriptionData)
+        res.json({
+          success: true,
+          subscription: subscriptionData
+        })
+        return
+      } else {
+        console.log('No active subscription found')
+      }
+    } else {
+      console.log('No Stripe customer ID found')
+    }
+    
+    // No active subscription found
+    console.log('Returning current subscription (no upgrade found)')
+    res.json({
+      success: true,
+      subscription: userSubscription
+    })
+  } catch (error) {
+    console.error('Error syncing subscription:', error)
+    console.error('Error stack:', error.stack)
+    res.status(500).json({ error: 'Failed to sync subscription', details: error.message })
+  }
+})
+
+// Create Stripe checkout session
+app.post('/api/create-checkout-session', authenticateUser, async (req, res) => {
+  try {
+    console.log('Creating checkout session for user:', req.userId)
+    const { priceId, tier, email } = req.body
+    
+    if (!priceId) {
+      console.error('Missing priceId in request')
+      return res.status(400).json({ error: 'Price ID is required' })
+    }
+
+    // Get user email from request body
+    const userEmail = email || 'user@example.com'
+    console.log('Using email:', userEmail, 'Price ID:', priceId)
+    
+    const apiUrl = process.env.API_URL || 'http://localhost:5173'
+    console.log('API URL for redirect:', apiUrl)
+    
+    const session = await createCheckoutSession(
+      req.userId,
+      userEmail,
+      priceId,
+      `${apiUrl}/plan?success=true`,
+      `${apiUrl}/plan?canceled=true`
+    )
+
+    console.log('Checkout session created:', session.id)
+    res.json({ sessionId: session.id })
+  } catch (error) {
+    console.error('Error creating checkout session:', error)
+    console.error('Error stack:', error.stack)
+    console.error('Error details:', {
+      message: error.message,
+      type: error.type,
+      code: error.code,
+      statusCode: error.statusCode
+    })
+    
+    // Return more detailed error for debugging
+    const errorMessage = error.message || 'Failed to create checkout session'
+    const errorDetails = {
+      error: errorMessage,
+      type: error.type || 'Unknown',
+      code: error.code || 'UNKNOWN_ERROR'
+    }
+    
+    // If it's a Stripe error, include more details
+    if (error.type && error.type.startsWith('Stripe')) {
+      errorDetails.stripeError = true
+      errorDetails.rawError = error.raw ? error.raw.message : undefined
+    }
+    
+    res.status(500).json(errorDetails)
+  }
+})
+
+// Stripe webhook endpoint
+app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature']
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET
+
+  if (!webhookSecret) {
+    console.warn('⚠️  STRIPE_WEBHOOK_SECRET not set, webhook verification disabled')
+    // In production, you should always verify webhooks
+    try {
+      // Parse the raw body as JSON for testing
+      const event = JSON.parse(req.body.toString())
+      await handleStripeWebhook(event)
+      res.json({ received: true })
+    } catch (error) {
+      console.error('Webhook error:', error)
+      res.status(400).json({ error: 'Webhook processing failed' })
+    }
+    return
+  }
+
+  try {
+    const Stripe = (await import('stripe')).default
+    const stripeInstance = new Stripe(process.env.STRIPE_SECRET_KEY)
+    const event = stripeInstance.webhooks.constructEvent(req.body, sig, webhookSecret)
+    
+    await handleStripeWebhook(event)
+    res.json({ received: true })
+  } catch (error) {
+    console.error('Webhook error:', error)
+    res.status(400).json({ error: `Webhook Error: ${error.message}` })
+  }
+})
+
 // Error handling for uncaught errors
 process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error)
+  console.error('❌ Uncaught Exception:', error)
+  console.error('Stack:', error.stack)
   process.exit(1)
 })
 
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason)
+  console.error('❌ Unhandled Rejection at:', promise)
+  console.error('Reason:', reason)
+  if (reason instanceof Error) {
+    console.error('Stack:', reason.stack)
+  }
 })
 
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`)
   console.log(`📝 OpenAI API Key: ${process.env.OPENAI_API_KEY ? '✅ Configured' : '❌ Missing - please set OPENAI_API_KEY in .env file'}`)
   console.log(`🎬 FFmpeg: ${ffmpegAvailable ? '✅ Available' : '❌ Not found - video processing will fail'}`)
+  
+  // Check Stripe key more carefully
+  const stripeKey = process.env.STRIPE_SECRET_KEY
+  if (stripeKey && stripeKey.length > 0 && stripeKey.startsWith('sk_')) {
+    console.log(`💳 Stripe: ✅ Configured`)
+  } else {
+    console.log(`💳 Stripe: ❌ Missing - please set STRIPE_SECRET_KEY in .env file`)
+    console.log(`   Current value: ${stripeKey ? `"${stripeKey.substring(0, 20)}..." (${stripeKey.length} chars)` : 'undefined'}`)
+  }
 }).on('error', (error) => {
   if (error.code === 'EADDRINUSE') {
     console.error(`❌ Port ${PORT} is already in use. Please stop the other process or change the PORT in .env`)

@@ -98,3 +98,8 @@ VITE_API_URL=http://localhost:3001
 - Backend must be on a platform that supports long-running processes
 - Vercel serverless functions will timeout
 
+
+
+
+
+

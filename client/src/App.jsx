@@ -1,21 +1,40 @@
 import { useState } from 'react'
+import { BrowserRouter as Router, Routes, Route, useNavigate } from 'react-router-dom'
 import { useAuth } from './contexts/AuthContext'
+import { useSubscription } from './contexts/SubscriptionContext'
+import Navbar from './components/Navbar'
 import VideoInput from './components/VideoInput'
 import ProcessingStatus from './components/ProcessingStatus'
 import ResultVideo from './components/ResultVideo'
 import AuthModal from './components/AuthModal'
+import PlanPage from './components/PlanPage'
 import './App.css'
 
-function App() {
-  const { currentUser, logout } = useAuth()
+function HomePage() {
+  const { currentUser } = useAuth()
+  const { tokensRemaining, subscriptionTier } = useSubscription()
   const [processing, setProcessing] = useState(false)
   const [progress, setProgress] = useState(0)
   const [status, setStatus] = useState('')
   const [resultVideoUrl, setResultVideoUrl] = useState(null)
   const [error, setError] = useState(null)
   const [showAuthModal, setShowAuthModal] = useState(false)
+  const [showPaymentModal, setShowPaymentModal] = useState(false)
+  const navigate = useNavigate()
 
   const handleProcess = async (type, data) => {
+    // Check authentication first
+    if (!currentUser) {
+      setShowAuthModal(true)
+      return
+    }
+
+    // Check if user has tokens (we'll verify on server too, but this prevents unnecessary processing)
+    if (tokensRemaining <= 0 && subscriptionTier === 'FREE') {
+      setShowPaymentModal(true)
+      return
+    }
+
     setProcessing(true)
     setProgress(0)
     setStatus('Starting...')
@@ -23,6 +42,9 @@ function App() {
     setResultVideoUrl(null)
 
     try {
+      // Get ID token for authentication
+      const idToken = await currentUser.getIdToken()
+      
       const formData = new FormData()
       
       if (type === 'file') {
@@ -34,6 +56,9 @@ function App() {
       const apiUrl = import.meta.env.VITE_API_URL || ''
       const response = await fetch(`${apiUrl}/api/process`, {
         method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${idToken}`
+        },
         body: formData,
       })
 
@@ -42,6 +67,13 @@ function App() {
         try {
           const errorData = await response.json()
           errorMessage = errorData.error || errorMessage
+          
+          // If it's a token error, show payment modal
+          if (errorData.code === 'INSUFFICIENT_TOKENS' || errorMessage.includes('token')) {
+            setShowPaymentModal(true)
+            setProcessing(false)
+            return
+          }
         } catch (e) {
           // If response is not JSON, try to get text
           try {
@@ -95,6 +127,23 @@ function App() {
               if (data.status) {
                 setStatus(data.status)
               }
+              // Handle token deduction
+              if (data.tokensDeducted !== undefined && data.newTokensRemaining !== undefined) {
+                console.log(`Tokens deducted: ${data.tokensDeducted}, New balance: ${data.newTokensRemaining}`)
+                // Update Firestore with new token count (subscription context will auto-update via onSnapshot)
+                if (currentUser) {
+                  import('firebase/firestore').then(({ doc, setDoc }) => {
+                    import('./firebase/config').then(({ db }) => {
+                      const userRef = doc(db, 'users', currentUser.uid)
+                      setDoc(userRef, {
+                        tokensRemaining: data.newTokensRemaining
+                      }, { merge: true }).catch(err => {
+                        console.error('Error updating tokens in Firestore:', err)
+                      })
+                    })
+                  })
+                }
+              }
               if (data.videoUrl) {
                 // Store both videoUrl and downloadUrl if available
                 setResultVideoUrl({
@@ -133,11 +182,6 @@ function App() {
             <h1>Video Censor</h1>
             <p>Clean your videos with automatic bleep sound effects</p>
           </div>
-          {currentUser && (
-            <button onClick={logout} className="logout-button">
-              Sign Out
-            </button>
-          )}
         </div>
       </header>
 
@@ -172,7 +216,45 @@ function App() {
         isOpen={showAuthModal} 
         onClose={() => setShowAuthModal(false)} 
       />
+      
+      {showPaymentModal && (
+        <div className="modal-overlay" onClick={() => setShowPaymentModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h2>Insufficient Tokens</h2>
+            <p>You don't have enough tokens to process this video. Please upgrade your plan to continue.</p>
+            <div className="modal-actions">
+              <button 
+                className="modal-button primary"
+                onClick={() => {
+                  setShowPaymentModal(false)
+                  navigate('/plan')
+                }}
+              >
+                View Plans
+              </button>
+              <button 
+                className="modal-button secondary"
+                onClick={() => setShowPaymentModal(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
+  )
+}
+
+function App() {
+  return (
+    <Router>
+      <Navbar />
+      <Routes>
+        <Route path="/" element={<HomePage />} />
+        <Route path="/plan" element={<PlanPage />} />
+      </Routes>
+    </Router>
   )
 }
 
