@@ -13,16 +13,39 @@ let db = null
 try {
   if (!admin.apps.length) {
     // Try to initialize with service account if available
-    const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT
+    let serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT
     if (serviceAccount) {
       try {
+        // Remove surrounding quotes if present (from .env file parsing)
+        serviceAccount = serviceAccount.trim()
+        if ((serviceAccount.startsWith('"') && serviceAccount.endsWith('"')) ||
+            (serviceAccount.startsWith("'") && serviceAccount.endsWith("'"))) {
+          serviceAccount = serviceAccount.slice(1, -1)
+        }
+        // dotenv converts \\n to actual newlines, but JSON.parse() needs \n escape sequences
+        // Convert actual newlines back to \\n (which JSON.parse will interpret as \n)
+        serviceAccount = serviceAccount.replace(/\n/g, '\\\\n').replace(/\r/g, '\\\\r')
+        
+        // Parse the JSON
+        const serviceAccountObj = JSON.parse(serviceAccount)
+        
+        // Convert \n escape sequences in private_key to actual newlines (Firebase Admin needs real newlines)
+        if (serviceAccountObj.private_key) {
+          serviceAccountObj.private_key = serviceAccountObj.private_key.replace(/\\n/g, '\n')
+        }
+        
         admin.initializeApp({
-          credential: admin.credential.cert(JSON.parse(serviceAccount))
+          credential: admin.credential.cert(serviceAccountObj)
         })
         db = admin.firestore()
         console.log('✅ Firebase Admin initialized with service account')
       } catch (e) {
         console.warn('⚠️  Could not initialize with service account:', e.message)
+        console.warn('   Make sure FIREBASE_SERVICE_ACCOUNT is valid JSON with properly escaped newlines (\\n)')
+        // Debug: show first 200 chars to help diagnose
+        if (serviceAccount) {
+          console.warn('   First 200 chars of service account:', serviceAccount.substring(0, 200))
+        }
       }
     } else {
       // Don't initialize Firestore without credentials - it will fail

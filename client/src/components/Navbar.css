@@ -96,3 +96,25 @@
   border-color: rgba(0, 0, 0, 0.2);
 }
 
+.signin-button {
+  padding: 8px 20px;
+  font-size: 14px;
+  font-weight: 500;
+  background: #000000;
+  color: #FFFFFF;
+  border: none;
+  border-radius: 980px;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.signin-button:hover {
+  background: #0077ED;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 113, 227, 0.3);
+}
+
+.signin-button:active {
+  transform: translateY(0);
+}
+

@@ -267,18 +267,35 @@ app.post('/api/process', upload.single('video'), authenticateUser, async (req, r
         // Calculate tokens: minimum 1 token for videos under 1 minute, round down for longer videos
         const tokensNeeded = videoDuration < 60 ? 1 : Math.floor(videoDuration / 60)
         
-        // Check if user has enough tokens
-        const tokenCheck = await checkUserTokens(req.userId, videoDuration)
-        if (!tokenCheck.hasEnough) {
+        // Get current token count from client (since server can't read Firestore)
+        // Client sends this in the request body
+        let currentTokens = null
+        if (req.body.currentTokens !== undefined && req.body.currentTokens !== null) {
+          currentTokens = parseInt(req.body.currentTokens)
+          console.log(`✅ Using client-provided token count: ${currentTokens}`)
+        } else {
+          // Fallback: try to get from subscription (but will return default 10 if db is null)
+          const tokenCheck = await checkUserTokens(req.userId, videoDuration)
+          currentTokens = tokenCheck.tokensRemaining
+          console.log(`⚠️  Using fallback token count from server (may be inaccurate): ${currentTokens}`)
+        }
+        
+        // Validate tokens
+        if (currentTokens === null || isNaN(currentTokens) || currentTokens < tokensNeeded) {
+          const errorMessage = `Not enough tokens. This video requires ${tokensNeeded} token${tokensNeeded > 1 ? 's' : ''}, but you only have ${currentTokens || 0}. Please upgrade your plan to process longer videos.`
           res.write(`data: ${JSON.stringify({ 
-            error: `Insufficient tokens. You need ${tokenCheck.tokensNeeded} tokens but only have ${tokenCheck.tokensRemaining} remaining.`,
+            error: errorMessage,
             code: 'INSUFFICIENT_TOKENS',
-            tokensNeeded: tokenCheck.tokensNeeded,
-            tokensRemaining: tokenCheck.tokensRemaining
+            tokensNeeded: tokensNeeded,
+            tokensRemaining: currentTokens || 0
           })}\n\n`)
           res.end()
           return
         }
+        
+        // Store current tokens for deduction later
+        req.currentTokens = currentTokens
+        console.log(`Token check passed: ${currentTokens} tokens available, need ${tokensNeeded}`)
       } catch (error) {
         console.error('Error checking tokens:', error)
         // Continue processing if token check fails (for now)
@@ -293,8 +310,18 @@ app.post('/api/process', upload.single('video'), authenticateUser, async (req, r
       try {
         // Calculate tokens: minimum 1 token for videos under 1 minute, round down for longer videos
         const tokensUsed = videoDuration < 60 ? 1 : Math.floor(videoDuration / 60)
-        const newTokensRemaining = await deductTokens(req.userId, tokensUsed)
-        console.log(`✅ Deducted ${tokensUsed} tokens from user ${req.userId}. New balance: ${newTokensRemaining}`)
+        
+        // Use the current tokens we stored earlier, or try to get from subscription
+        let currentTokens = req.currentTokens
+        if (currentTokens === null || currentTokens === undefined) {
+          // Fallback: try to get from subscription
+          const subscription = await getUserSubscription(req.userId)
+          currentTokens = subscription.tokensRemaining
+          console.log(`⚠️  Using fallback token count from getUserSubscription: ${currentTokens}`)
+        }
+        
+        const newTokensRemaining = Math.max(0, currentTokens - tokensUsed)
+        console.log(`✅ Deducted ${tokensUsed} tokens from user ${req.userId}. Balance: ${currentTokens} → ${newTokensRemaining}`)
         
         // Include token deduction info in response for client to update Firestore
         res.write(`data: ${JSON.stringify({ 

@@ -85,10 +85,22 @@ export function SubscriptionProvider({ children }) {
     }
   }, [currentUser])
 
+  // Calculate tokens remaining - default to 10 for new FREE tier users
+  const getTokensRemaining = () => {
+    if (subscription?.tokensRemaining !== undefined) {
+      return subscription.tokensRemaining
+    }
+    // If subscription is null but user is logged in, they're a new user - give them 10 tokens
+    if (currentUser && !subscription) {
+      return 10
+    }
+    return 0
+  }
+
   const value = {
     subscription,
     loading,
-    tokensRemaining: subscription?.tokensRemaining || 0,
+    tokensRemaining: getTokensRemaining(),
     subscriptionTier: subscription?.subscriptionTier || 'FREE'
   }
 

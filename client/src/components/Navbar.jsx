@@ -1,12 +1,15 @@
+import { useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import { useSubscription } from '../contexts/SubscriptionContext'
+import AuthModal from './AuthModal'
 import './Navbar.css'
 
 function Navbar() {
   const { currentUser, logout } = useAuth()
   const { tokensRemaining, subscriptionTier } = useSubscription()
   const location = useLocation()
+  const [showAuthModal, setShowAuthModal] = useState(false)
 
   return (
     <nav className="navbar">
@@ -29,7 +32,7 @@ function Navbar() {
             Plan
           </Link>
           
-          {currentUser && (
+          {currentUser ? (
             <div className="navbar-user-info">
               <span className="token-info">
                 {tokensRemaining} tokens ({subscriptionTier})
@@ -38,9 +41,21 @@ function Navbar() {
                 Sign Out
               </button>
             </div>
+          ) : (
+            <button 
+              onClick={() => setShowAuthModal(true)} 
+              className="signin-button"
+            >
+              Sign In
+            </button>
           )}
         </div>
       </div>
+      
+      <AuthModal 
+        isOpen={showAuthModal} 
+        onClose={() => setShowAuthModal(false)} 
+      />
     </nav>
   )
 }

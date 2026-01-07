@@ -52,6 +52,9 @@ function HomePage() {
       } else if (type === 'youtube') {
         formData.append('youtubeUrl', data)
       }
+      
+      // Send current token count so server can use accurate value
+      formData.append('currentTokens', tokensRemaining.toString())
 
       const apiUrl = import.meta.env.VITE_API_URL || ''
       const response = await fetch(`${apiUrl}/api/process`, {
@@ -109,10 +112,11 @@ function HomePage() {
       // Handle streaming response for progress updates
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
+      let shouldStop = false
 
       while (true) {
         const { done, value } = await reader.read()
-        if (done) break
+        if (done || shouldStop) break
 
         const chunk = decoder.decode(value)
         const lines = chunk.split('\n').filter(line => line.trim())
@@ -121,6 +125,16 @@ function HomePage() {
           if (line.startsWith('data: ')) {
             try {
               const data = JSON.parse(line.slice(6))
+              
+              // Handle errors first
+              if (data.error) {
+                setError(data.error)
+                setProcessing(false)
+                setStatus('')
+                shouldStop = true
+                break
+              }
+              
               if (data.progress !== undefined) {
                 setProgress(data.progress)
               }
