@@ -8,6 +8,8 @@ import ProcessingStatus from './components/ProcessingStatus'
 import ResultVideo from './components/ResultVideo'
 import AuthModal from './components/AuthModal'
 import PlanPage from './components/PlanPage'
+import ContactPage from './components/ContactPage'
+import ManageSubscriptionPage from './components/ManageSubscriptionPage'
 import './App.css'
 
 function HomePage() {
@@ -144,15 +146,28 @@ function HomePage() {
               // Handle token deduction
               if (data.tokensDeducted !== undefined && data.newTokensRemaining !== undefined) {
                 console.log(`Tokens deducted: ${data.tokensDeducted}, New balance: ${data.newTokensRemaining}`)
-                // Update Firestore with new token count (subscription context will auto-update via onSnapshot)
+                // Update Firestore with new token count and increment video count
                 if (currentUser) {
-                  import('firebase/firestore').then(({ doc, setDoc }) => {
+                  import('firebase/firestore').then(({ doc, getDoc, setDoc, increment }) => {
                     import('./firebase/config').then(({ db }) => {
                       const userRef = doc(db, 'users', currentUser.uid)
-                      setDoc(userRef, {
-                        tokensRemaining: data.newTokensRemaining
-                      }, { merge: true }).catch(err => {
-                        console.error('Error updating tokens in Firestore:', err)
+                      // Get current video count and increment it
+                      getDoc(userRef).then((userDoc) => {
+                        const currentVideos = userDoc.exists() ? (userDoc.data().videosProcessed || 0) : 0
+                        setDoc(userRef, {
+                          tokensRemaining: data.newTokensRemaining,
+                          videosProcessed: currentVideos + 1
+                        }, { merge: true }).catch(err => {
+                          console.error('Error updating Firestore:', err)
+                        })
+                      }).catch(err => {
+                        console.error('Error reading user document:', err)
+                        // Fallback: just update tokens
+                        setDoc(userRef, {
+                          tokensRemaining: data.newTokensRemaining
+                        }, { merge: true }).catch(updateErr => {
+                          console.error('Error updating tokens in Firestore:', updateErr)
+                        })
                       })
                     })
                   })
@@ -267,6 +282,8 @@ function App() {
       <Routes>
         <Route path="/" element={<HomePage />} />
         <Route path="/plan" element={<PlanPage />} />
+        <Route path="/contact" element={<ContactPage />} />
+        <Route path="/manage-subscription" element={<ManageSubscriptionPage />} />
       </Routes>
     </Router>
   )

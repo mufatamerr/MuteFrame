@@ -35,7 +35,54 @@ export function SubscriptionProvider({ children }) {
         if (!isMounted) return
         
         if (docSnap.exists()) {
-          setSubscription(docSnap.data())
+          const userData = docSnap.data()
+          
+          // Check if we need to reset tokens for the month
+          const now = new Date()
+          const nextResetDate = userData.nextResetDate ? new Date(userData.nextResetDate) : null
+          
+          if (nextResetDate && now >= nextResetDate) {
+            // Time to reset tokens - calculate new token count based on tier
+            const { setDoc } = await import('firebase/firestore')
+            
+            // Get token count for the user's tier
+            const tier = userData.subscriptionTier || 'FREE'
+            const tierTokens = {
+              'FREE': 10,
+              'TIER1': 100,
+              'TIER2': 500,
+              'KING': 5000
+            }[tier] || 10
+            
+            // Calculate next reset date (first day of next month)
+            const newNextReset = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+            
+            // Update Firestore with reset tokens
+            const updatedData = {
+              ...userData,
+              tokensRemaining: tierTokens,
+              tokensTotal: tierTokens,
+              lastResetDate: now.toISOString(),
+              nextResetDate: newNextReset.toISOString()
+            }
+            
+            try {
+              await setDoc(userRef, updatedData, { merge: true })
+              console.log(`✅ Tokens reset for user: ${tierTokens} tokens (${tier} tier)`)
+              if (isMounted) {
+                setSubscription(updatedData)
+              }
+            } catch (error) {
+              console.error('Error resetting tokens:', error)
+              // Still set the subscription data even if update fails
+              if (isMounted) {
+                setSubscription(userData)
+              }
+            }
+          } else {
+            // No reset needed, just set the subscription data
+            setSubscription(userData)
+          }
         } else {
           // Create default subscription for new user
           const now = new Date()

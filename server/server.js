@@ -44,7 +44,8 @@ import {
   handleStripeWebhook,
   getUserSubscription,
   SUBSCRIPTION_TIERS,
-  stripe
+  stripe,
+  db
 } from './services/subscriptionService.js'
 import ffmpeg from 'fluent-ffmpeg'
 
@@ -532,6 +533,92 @@ app.post('/api/sync-subscription', authenticateUser, async (req, res) => {
     console.error('Error syncing subscription:', error)
     console.error('Error stack:', error.stack)
     res.status(500).json({ error: 'Failed to sync subscription', details: error.message })
+  }
+})
+
+// Cancel subscription
+app.post('/api/cancel-subscription', authenticateUser, async (req, res) => {
+  try {
+    const userId = req.userId
+    const userSubscription = await getUserSubscription(userId)
+    
+    if (!userSubscription.stripeSubscriptionId) {
+      // No subscription ID in Firestore, just update to free tier
+      const now = new Date()
+      const nextReset = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+      
+      if (db) {
+        try {
+          await db.collection('users').doc(userId).update({
+            subscriptionTier: 'FREE',
+            tokensRemaining: SUBSCRIPTION_TIERS.FREE.tokens,
+            tokensTotal: SUBSCRIPTION_TIERS.FREE.tokens,
+            stripeSubscriptionId: null,
+            lastResetDate: now.toISOString(),
+            nextResetDate: nextReset.toISOString()
+          })
+          console.log(`✅ Updated Firestore for user ${userId} to FREE tier (no subscription ID found)`)
+        } catch (firestoreError) {
+          console.warn('⚠️  Could not update Firestore:', firestoreError.message)
+        }
+      }
+      
+      return res.json({
+        success: true,
+        message: 'Subscription cancelled successfully'
+      })
+    }
+    
+    // Try to cancel the subscription in Stripe
+    try {
+      // First, check if subscription exists
+      const subscription = await stripe.subscriptions.retrieve(userSubscription.stripeSubscriptionId)
+      
+      // If subscription exists and is active, cancel it
+      if (subscription.status === 'active' || subscription.status === 'trialing') {
+        await stripe.subscriptions.cancel(userSubscription.stripeSubscriptionId)
+        console.log(`✅ Cancelled subscription ${subscription.id} for user ${userId}`)
+      } else {
+        console.log(`ℹ️  Subscription ${userSubscription.stripeSubscriptionId} is already ${subscription.status}`)
+      }
+    } catch (stripeError) {
+      // If subscription doesn't exist or is already cancelled, that's okay
+      if (stripeError.code === 'resource_missing' || stripeError.statusCode === 404) {
+        console.log(`ℹ️  Subscription ${userSubscription.stripeSubscriptionId} not found in Stripe (may already be cancelled)`)
+      } else {
+        // For other errors, log but continue with Firestore update
+        console.warn(`⚠️  Error cancelling subscription in Stripe: ${stripeError.message}`)
+      }
+    }
+    
+    // Update Firestore to downgrade to free tier (regardless of Stripe cancellation result)
+    const now = new Date()
+    const nextReset = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+    
+    if (db) {
+      try {
+        await db.collection('users').doc(userId).update({
+          subscriptionTier: 'FREE',
+          tokensRemaining: SUBSCRIPTION_TIERS.FREE.tokens,
+          tokensTotal: SUBSCRIPTION_TIERS.FREE.tokens,
+          stripeSubscriptionId: null,
+          lastResetDate: now.toISOString(),
+          nextResetDate: nextReset.toISOString()
+        })
+        console.log(`✅ Updated Firestore for user ${userId} to FREE tier`)
+      } catch (firestoreError) {
+        console.warn('⚠️  Could not update Firestore:', firestoreError.message)
+        return res.status(500).json({ error: 'Failed to update subscription status' })
+      }
+    }
+    
+    res.json({
+      success: true,
+      message: 'Subscription cancelled successfully'
+    })
+  } catch (error) {
+    console.error('Error cancelling subscription:', error)
+    res.status(500).json({ error: error.message || 'Failed to cancel subscription' })
   }
 })
 

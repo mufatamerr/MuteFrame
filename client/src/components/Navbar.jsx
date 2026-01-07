@@ -31,6 +31,20 @@ function Navbar() {
           >
             Plan
           </Link>
+          <Link 
+            to="/contact" 
+            className={`navbar-link ${location.pathname === '/contact' ? 'active' : ''}`}
+          >
+            Contact
+          </Link>
+          {currentUser && subscriptionTier !== 'FREE' && (
+            <Link 
+              to="/manage-subscription" 
+              className={`navbar-link ${location.pathname === '/manage-subscription' ? 'active' : ''}`}
+            >
+              Manage Subscription
+            </Link>
+          )}
           
           {currentUser ? (
             <div className="navbar-user-info">

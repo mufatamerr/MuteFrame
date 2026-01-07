@@ -5,8 +5,8 @@ import admin from 'firebase-admin'
 // Initialize Stripe
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY)
 
-// Export stripe instance for use in server endpoints
-export { stripe }
+// Export stripe instance and db for use in server endpoints
+export { stripe, db }
 
 // Initialize Firebase Admin
 let db = null
